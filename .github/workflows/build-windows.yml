@@ -33,12 +33,19 @@ jobs:
       - name: Create the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release create "v1.0.${{ github.run_number }}" --target "${{ github.sha }}" --title "1.0.${{ github.run_number }}" --notes "Built from ${{ github.sha }}"
+        # A draft until every file is in: published empty, installed copies checking meanwhile
+        # find a release with no latest.yml and report that updates can't be checked.
+        run: gh release create "v1.0.${{ github.run_number }}" --draft --target "${{ github.sha }}" --title "1.0.${{ github.run_number }}" --notes "Built from ${{ github.sha }}"
 
       - name: Build and publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: npm run build && npx electron-builder --win --x64 --publish always
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit "v1.0.${{ github.run_number }}" --draft=false --latest
 
       - name: Build extension
         run: npm run build:extension
