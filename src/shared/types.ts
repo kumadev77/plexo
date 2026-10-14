@@ -352,6 +352,8 @@ export interface AppSettings {
   /** How speeds are shown everywhere; sizes stay in bytes either way. */
   speedUnit?: SpeedUnit
   browserExtensionUsed?: boolean
+  /** yt-dlp.exe, for video pages (see main/video). ffmpeg is looked for beside it. */
+  ytDlpPath?: string
 }
 
 /** bytes: MB/s. bits: Mbps, as internet plans and speed tests count them. */

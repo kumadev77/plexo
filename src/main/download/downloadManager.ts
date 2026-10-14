@@ -1748,7 +1748,18 @@ export class DownloadManager {
     runtime.publishing = false
 
     this.pushUpdate(runtime)
-    if (runtime.state.status === 'completed') await this.moveToHistory(runtime)
+    if (runtime.state.status === 'completed') {
+      const { id, destinationPath } = runtime.state
+      await this.moveToHistory(runtime)
+      for (const listener of this.completedListeners) listener(id, destinationPath)
+    }
+  }
+
+  private completedListeners: ((id: string, destinationPath: string) => void)[] = []
+
+  /** Told of each download once its file is in place: a video's streams wait on this to be joined. */
+  onCompleted(listener: (id: string, destinationPath: string) => void): void {
+    this.completedListeners.push(listener)
   }
 
   /** Stops the current run: every stream, and the run's own wait. */

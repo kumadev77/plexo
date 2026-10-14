@@ -4,6 +4,13 @@ import { browserContext, confirm, reach, send, storeOf, wake, type Reach } from 
 import { excluded, loadSettings } from './settings'
 
 const MENU_ID = 'download-with-plexo'
+const VIDEO_MENU_ID = 'download-video-with-plexo'
+const VIDEO_PAGES = [
+  '*://*.youtube.com/watch*',
+  '*://*.youtube.com/shorts/*',
+  '*://*.youtube.com/live/*',
+  '*://youtu.be/*'
+]
 // Plexo can't tell the extension it has quit, so the toolbar icon checks on a timer.
 const CHECK_ALARM = 'check-plexo'
 
@@ -89,7 +96,8 @@ async function sendLink(
   info: chrome.contextMenus.OnClickData,
   tab?: chrome.tabs.Tab
 ): Promise<void> {
-  const url = info.linkUrl
+  // On a video page itself there's no link: the page is what's sent.
+  const url = info.menuItemId === VIDEO_MENU_ID ? (tab?.url ?? info.pageUrl) : info.linkUrl
   if (!url) return
   const request: BridgeAddRequest = /^magnet:/i.test(url)
     ? { url }
@@ -113,11 +121,15 @@ function setUp(): void {
 }
 
 function createMenu(): void {
-  void api.contextMenus
-    .removeAll()
-    .then(() =>
-      api.contextMenus.create({ id: MENU_ID, title: 'Download with Plexo', contexts: ['link'] })
-    )
+  void api.contextMenus.removeAll().then(() => {
+    api.contextMenus.create({ id: MENU_ID, title: 'Download with Plexo', contexts: ['link'] })
+    api.contextMenus.create({
+      id: VIDEO_MENU_ID,
+      title: 'Download video with Plexo',
+      contexts: ['page', 'video'],
+      documentUrlPatterns: VIDEO_PAGES
+    })
+  })
 }
 
 api.runtime.onInstalled.addListener(setUp)
@@ -126,7 +138,7 @@ api.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === CHECK_ALARM) void showState()
 })
 api.contextMenus.onClicked.addListener((info, tab) => {
-  if (info.menuItemId === MENU_ID) void sendLink(info, tab)
+  if (info.menuItemId === MENU_ID || info.menuItemId === VIDEO_MENU_ID) void sendLink(info, tab)
 })
 api.tabs.onCreated.addListener((tab) => {
   if (tab.id !== undefined) openedAt.set(tab.id, Date.now())

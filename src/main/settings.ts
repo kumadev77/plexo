@@ -90,6 +90,9 @@ function sanitizeSettings(parsed: unknown): AppSettings {
     settings.speedUnit = parsed.speedUnit
   }
   if (parsed.browserExtensionUsed === true) settings.browserExtensionUsed = true
+  if (typeof parsed.ytDlpPath === 'string' && isAbsolute(parsed.ytDlpPath)) {
+    settings.ytDlpPath = parsed.ytDlpPath
+  }
   return settings
 }
 

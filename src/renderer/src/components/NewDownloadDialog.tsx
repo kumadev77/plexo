@@ -1,6 +1,16 @@
 import type { ProbeResult } from '@shared/types'
+import { isVideoPageUrl, VIDEO_QUALITIES, type VideoQuality } from '@shared/video'
 import { cn } from 'cn'
-import { AlertTriangle, ChevronLeft, ChevronRight, FolderOpen, Globe, Lock, X } from 'lucide-react'
+import {
+  AlertTriangle,
+  ChevronLeft,
+  ChevronRight,
+  FolderOpen,
+  Globe,
+  Lock,
+  Video,
+  X
+} from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { useFormatSpeedLimit } from '../hooks/useFormatSpeed'
 import { useNetworkUsage } from '../hooks/useNetworks'
@@ -100,6 +110,9 @@ function NewDownloadForm({ onDone }: { onDone: () => void }): React.JSX.Element 
   const [skippedFiles, setSkippedFiles] = useState<number[]>([])
   // For this download only: the next one starts on Auto again.
   const [streamsChoice, setStreamsChoice] = useState<StreamsChoice>('auto')
+  // A video page has nothing to probe: yt-dlp reads it once Download is pressed.
+  const video = isVideoPageUrl(url)
+  const [quality, setQuality] = useState<VideoQuality>('best')
 
   // Opened with nothing in it: a link on the clipboard is most likely what it's for, as download
   // managers have long assumed. Anything else on the clipboard is left alone.
@@ -132,6 +145,10 @@ function NewDownloadForm({ onDone }: { onDone: () => void }): React.JSX.Element 
     if (given && given.url !== trimmed) dropLink(given.id, false)
     setFileNameOverride(null)
     setSkippedFiles([])
+    if (isVideoPageUrl(trimmed)) {
+      setProbe({ status: 'idle' })
+      return
+    }
     if (given?.url === trimmed && given.probe) {
       setProbe({ status: 'ready', result: given.probe })
       return
@@ -191,13 +208,15 @@ function NewDownloadForm({ onDone }: { onDone: () => void }): React.JSX.Element 
       : []
 
   const canStart =
-    probe.status === 'ready' &&
+    (probe.status === 'ready' || video) &&
     (!torrent || chosenFiles.length > 0) &&
     selectedInterfaceIds.length > 0 &&
     Boolean(destinationDir) &&
     !starting
   const startLabel = starting
-    ? 'Starting'
+    ? video
+      ? 'Reading the video'
+      : 'Starting'
     : probe.status === 'probing'
       ? 'Checking'
       : scheduledWait
@@ -270,38 +289,19 @@ function NewDownloadForm({ onDone }: { onDone: () => void }): React.JSX.Element 
   }
 
   const handleStart = async (): Promise<void> => {
-    if (probe.status !== 'ready' || !canStart) return
+    if (!canStart) return
     // Captured now: links can arrive and change what's shown while this starts.
     const linkId = shownLink?.id
     const form = useAppStore.getState().formKey
     setStarting(true)
     setStartError(null)
     try {
-      const common = {
-        url: probe.result.finalUrl,
-        destinationDir,
-        suggestedFileName: fileNameOverride?.trim() || probe.result.suggestedFileName,
-        totalBytes: probe.result.totalBytes ?? 0,
-        supportsRanges: multiChunkAllowed,
-        interfaceIds: selectedInterfaceIds,
-        etag: probe.result.etag,
-        lastModified: probe.result.lastModified
-      }
-      const id = await window.plexo.startDownload(
-        probe.result.kind === 'torrent'
-          ? {
-              ...common,
-              kind: 'torrent',
-              infoHash: probe.result.torrent.infoHash,
-              selectedFiles: skippedFiles.length > 0 ? chosenFiles : undefined
-            }
-          : {
-              ...common,
-              kind: 'http',
-              streamsPerNetwork: streamsChoice === 'auto' ? undefined : streamsChoice
-            },
-        linkId
-      )
+      const id = video
+        ? await window.plexo.startVideo(
+            { url: url.trim(), quality, destinationDir, interfaceIds: selectedInterfaceIds },
+            linkId
+          )
+        : await startProbed(linkId)
       // Remembered for the next download, like the folder. Not a single-stream pick: that's one
       // network because the file allows no more, not because the others were unwanted.
       if (!isSingleStreamOnly) {
@@ -329,6 +329,35 @@ function NewDownloadForm({ onDone }: { onDone: () => void }): React.JSX.Element 
       setStartError(describeError(error))
       setStarting(false)
     }
+  }
+
+  const startProbed = async (linkId: string | undefined): Promise<string> => {
+    if (probe.status !== 'ready') throw new Error('The link hasn’t been checked yet.')
+    const common = {
+      url: probe.result.finalUrl,
+      destinationDir,
+      suggestedFileName: fileNameOverride?.trim() || probe.result.suggestedFileName,
+      totalBytes: probe.result.totalBytes ?? 0,
+      supportsRanges: multiChunkAllowed,
+      interfaceIds: selectedInterfaceIds,
+      etag: probe.result.etag,
+      lastModified: probe.result.lastModified
+    }
+    return window.plexo.startDownload(
+      probe.result.kind === 'torrent'
+        ? {
+            ...common,
+            kind: 'torrent',
+            infoHash: probe.result.torrent.infoHash,
+            selectedFiles: skippedFiles.length > 0 ? chosenFiles : undefined
+          }
+        : {
+            ...common,
+            kind: 'http',
+            streamsPerNetwork: streamsChoice === 'auto' ? undefined : streamsChoice
+          },
+      linkId
+    )
   }
 
   const fileName = ready ? (fileNameOverride ?? ready.suggestedFileName) : ''
@@ -493,6 +522,36 @@ function NewDownloadForm({ onDone }: { onDone: () => void }): React.JSX.Element 
                 ]
                   .filter(Boolean)
                   .join(' · ')}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {video && (
+          <div className="flex items-center gap-3">
+            <div className="flex size-10 shrink-0 items-center justify-center rounded-lg border-[0.5px] border-border bg-card text-muted-foreground">
+              <Video aria-hidden className="size-4" />
+            </div>
+            <div className="flex min-w-0 flex-1 flex-col gap-1.5">
+              <div className="text-[14px] font-medium">YouTube video</div>
+              <ToggleGroup
+                value={[quality]}
+                onValueChange={(values) => {
+                  if (values.length > 0) setQuality(values[0] as VideoQuality)
+                }}
+                aria-label="Quality"
+                variant="pill"
+                size="xs"
+                spacing={1}
+              >
+                {VIDEO_QUALITIES.map((choice) => (
+                  <ToggleGroupItem key={choice.value} value={choice.value} className="h-6 px-2">
+                    {choice.label}
+                  </ToggleGroupItem>
+                ))}
+              </ToggleGroup>
+              <div className="font-mono text-[11.5px] text-muted-foreground">
+                yt-dlp finds the streams; Plexo downloads them and joins video and audio.
               </div>
             </div>
           </div>

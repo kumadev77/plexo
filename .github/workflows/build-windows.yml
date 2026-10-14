@@ -1,0 +1,37 @@
+name: Build Windows installer
+
+# This fork's own build: the Windows installer only, kept as a downloadable artifact.
+on:
+  push:
+    branches: [youtube-downloads]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build && npx electron-builder --win --x64 --publish never
+
+      - name: Build extension
+        run: npm run build:extension
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plexo-windows-installer
+          path: dist/*-setup.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plexo-extension-chromium
+          path: extension/dist/chrome

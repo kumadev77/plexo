@@ -9,6 +9,7 @@ import type {
   TorrentFileEntry,
   UpdateState
 } from './types'
+import type { StartVideoRequest } from './video'
 
 /** The request/response half of the IPC surface (every IpcChannels entry except the
  * main->renderer push events, downloadUpdated, networksChanged, historyChanged, linkReceived and
@@ -32,6 +33,9 @@ export interface IpcContract {
   openDownload: { args: [id: string]; result: boolean }
   /** `linkId`: the PendingLink whose browser sign-in it starts with. */
   startDownload: { args: [request: StartDownloadRequest, linkId?: string]; result: string }
+  /** A video page: yt-dlp finds its streams and each one starts as a download. The first one's
+   * id. `linkId`: the PendingLink it came from, let go once started. */
+  startVideo: { args: [request: StartVideoRequest, linkId?: string]; result: string }
   /** Every download, oldest first, each as a snapshot. */
   listDownloads: { args: []; result: DownloadUpdate[] }
   /** Finished downloads, newest first. One is forgotten with removeDownload. */

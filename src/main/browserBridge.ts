@@ -10,6 +10,7 @@ import {
   type BridgePing
 } from '../shared/browserBridge'
 import type { BrowserContext, ProbeResult } from '../shared/types'
+import { isVideoPageUrl } from '../shared/video'
 import { browserContextFrom, requestHeaders } from './download/browserContext'
 import type { DownloadManager } from './download/downloadManager'
 import { probeUrl } from './download/probe'
@@ -214,8 +215,10 @@ async function add(
     json(res, 200, cors, { token } satisfies BridgeHandoff)
   }
 
-  // A magnet link has nothing to check here: New download looks it up.
+  // A magnet link has nothing to check here: New download looks it up. A video page is a web
+  // page, not the file: yt-dlp finds that once a quality is picked.
   if (/^magnet:/i.test(request.url)) return hold({ url: request.url })
+  if (isVideoPageUrl(request.url)) return hold({ url: request.url, from: request.browser?.name })
 
   const gone = new Promise<void>((resolve) =>
     res.once('close', () => !res.writableFinished && resolve())

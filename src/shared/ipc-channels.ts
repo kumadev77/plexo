@@ -11,6 +11,7 @@ export const IpcChannels = {
   revealDownload: 'shell:reveal-download',
   openDownload: 'shell:open-download',
   startDownload: 'download:start',
+  startVideo: 'download:start-video',
   listDownloads: 'download:list',
   listHistory: 'history:list',
   clearHistory: 'history:clear',

@@ -38,6 +38,8 @@ const plexoApi = {
   openDownload: (id: string) => invoke('openDownload', id),
   startDownload: (request: IpcContract['startDownload']['args'][0], linkId?: string) =>
     invoke('startDownload', request, linkId),
+  startVideo: (request: IpcContract['startVideo']['args'][0], linkId?: string) =>
+    invoke('startVideo', request, linkId),
   listDownloads: () => invoke('listDownloads'),
   listHistory: () => invoke('listHistory'),
   clearHistory: () => invoke('clearHistory'),

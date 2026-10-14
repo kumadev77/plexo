@@ -26,6 +26,7 @@ import { pendingLink, pendingLinks, releaseLink } from '../openLinks'
 import { NetworkMonitor } from '../network/interfaces'
 import { loadSettings, saveSettings } from '../settings'
 import { showUpdateMenu, updateState } from '../updater'
+import { VideoDownloads } from '../video/videoDownloads'
 
 async function openNetworkSettings(): Promise<void> {
   if (process.platform === 'win32') {
@@ -204,6 +205,13 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): Down
     const id = await manager.start(
       browser && request.kind === 'http' ? { ...request, browser } : request
     )
+    if (linkId !== undefined) releaseLink(linkId)
+    return id
+  })
+
+  const videos = new VideoDownloads(manager)
+  handle('startVideo', async (_event, request, linkId) => {
+    const id = await videos.start(request)
     if (linkId !== undefined) releaseLink(linkId)
     return id
   })
