@@ -138,9 +138,22 @@ async function tools(): Promise<{ ytDlp: string; ffmpeg: string }> {
   return { ytDlp, ffmpeg: (await exists(beside)) ? beside : 'ffmpeg' }
 }
 
+let nodeRuntime: Promise<string[]> | undefined
+
+/** yt-dlp solves YouTube's challenge with a JavaScript runtime, and only looks for deno on its
+ * own; without one YouTube serves its streams at a crawl (measured: 36 KB/s, 95 with node). */
+function jsRuntime(): Promise<string[]> {
+  nodeRuntime ??= run('node', ['--version'], 10_000).then(
+    () => ['--js-runtimes', 'node'],
+    () => []
+  )
+  return nodeRuntime
+}
+
 async function ytDlp(args: string[]): Promise<string> {
   const { ytDlp } = await tools()
-  return run(ytDlp, ['--no-playlist', '--no-warnings', ...args], RESOLVE_TIMEOUT_MS).catch(
+  const base = ['--no-playlist', '--no-warnings', '--no-update', ...(await jsRuntime())]
+  return run(ytDlp, [...base, ...args], RESOLVE_TIMEOUT_MS).catch(
     (error: NodeJS.ErrnoException) => {
       throw new Error(
         error.code === 'ENOENT'
