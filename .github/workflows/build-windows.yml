@@ -1,10 +1,14 @@
 name: Build Windows installer
 
-# This fork's own build: the Windows installer only, kept as a downloadable artifact.
+# This fork's own build: every push to youtube-downloads publishes a release that installed
+# copies update themselves from (electron-builder.yml's publish), with a version that only grows.
 on:
   push:
     branches: [youtube-downloads]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -20,16 +24,17 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build
-        run: npm run build && npx electron-builder --win --x64 --publish never
+      # 1.0.<run>: newer than the original's 1.0.0-rc builds, and than this fork's last release.
+      - name: Set the version
+        run: npm version "1.0.${{ github.run_number }}" --no-git-tag-version
+
+      - name: Build and publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npm run build && npx electron-builder --win --x64 --publish always
 
       - name: Build extension
         run: npm run build:extension
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: plexo-windows-installer
-          path: dist/*-setup.exe
 
       - uses: actions/upload-artifact@v4
         with:

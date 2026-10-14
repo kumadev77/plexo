@@ -91,5 +91,8 @@ npmRebuild: false
 # workflow uploads them, with the latest*.yml files the updater reads.
 publish:
   provider: github
-  owner: anmolkapil
+  # This fork's releases: the original's would replace its video downloads.
+  owner: kumadev77
   repo: plexo
+  # Published straight away, not as a draft: the updater only sees a published release.
+  releaseType: release
