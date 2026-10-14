@@ -717,6 +717,24 @@ export class DownloadManager {
     this.historyChanged()
   }
 
+  /** A finished download's file was replaced, as a video's streams are once joined into one: its
+   * entry now shows that file, and the entries of the files that went into it are forgotten. */
+  async replaceFinished(id: string, path: string, merged: string[]): Promise<void> {
+    const entry = await findInHistory(id)
+    if (entry) {
+      const { size } = await stat(path)
+      await addToHistory({
+        ...entry,
+        destinationPath: path,
+        fileName: basename(path),
+        totalBytes: size,
+        bytesDownloaded: size
+      })
+    }
+    await removeFromHistory(merged)
+    this.historyChanged()
+  }
+
   private historyChanged(): void {
     const window = this.getWindow()
     if (window && !window.isDestroyed()) window.webContents.send(IpcChannels.historyChanged)

@@ -347,6 +347,9 @@ export class VideoDownloads {
     try {
       await run(job.ffmpeg, ['-y', '-loglevel', 'error', ...args, job.output], CONVERT_TIMEOUT_MS)
       await Promise.all(parts.map((part) => rm(part, { force: true })))
+      // Finished shows the one file made, under the first download's entry, not the parts.
+      const [first, ...rest] = Object.keys(job.parts)
+      await this.manager.replaceFinished(first, job.output, rest)
       new Notification({ title: 'Video ready', body: job.output }).show()
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error)
