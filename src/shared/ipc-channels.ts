@@ -12,6 +12,7 @@ export const IpcChannels = {
   openDownload: 'shell:open-download',
   startDownload: 'download:start',
   startVideo: 'download:start-video',
+  inspectVideo: 'download:inspect-video',
   listDownloads: 'download:list',
   listHistory: 'history:list',
   clearHistory: 'history:clear',

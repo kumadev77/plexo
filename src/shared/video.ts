@@ -1,20 +1,37 @@
 // Video pages (YouTube) aren't files: yt-dlp finds the streams behind them, Plexo downloads each
 // stream as an ordinary HTTP download, and ffmpeg joins video and audio once both are in.
 
-export type VideoQuality = 'best' | '1080' | '720' | 'audio'
+/** `best`, a height such as `1080p`, or audio only: as it comes (m4a) or turned into mp3. */
+export type VideoQuality = 'best' | `${number}p` | 'audio' | 'mp3'
 
-export const VIDEO_QUALITIES: { value: VideoQuality; label: string }[] = [
-  { value: 'best', label: 'Best' },
-  { value: '1080', label: '1080p' },
-  { value: '720', label: '720p' },
-  { value: 'audio', label: 'Audio only' }
-]
+/** What New download offers for a video, read by yt-dlp before anything starts. */
+export interface VideoInfo {
+  title: string
+  /** Every height the video comes in, tallest first. */
+  heights: number[]
+  hasAudio: boolean
+  durationSeconds?: number
+}
 
 export interface StartVideoRequest {
   url: string
   quality: VideoQuality
   destinationDir: string
   interfaceIds: string[]
+}
+
+/** Every choice for `info`, in the order shown. */
+export function videoQualities(info: VideoInfo): { value: VideoQuality; label: string }[] {
+  return [
+    { value: 'best', label: 'Best' },
+    ...info.heights.map((height) => ({ value: `${height}p` as const, label: `${height}p` })),
+    ...(info.hasAudio
+      ? [
+          { value: 'audio' as const, label: 'Audio (M4A)' },
+          { value: 'mp3' as const, label: 'Audio (MP3)' }
+        ]
+      : [])
+  ]
 }
 
 const VIDEO_HOSTS = /^(www\.|m\.|music\.)?(youtube\.com|youtube-nocookie\.com|youtu\.be)$/i

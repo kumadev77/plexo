@@ -209,7 +209,8 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): Down
     return id
   })
 
-  const videos = new VideoDownloads(manager)
+  const videos = new VideoDownloads(manager, networks)
+  handle('inspectVideo', async (_event, url) => videos.inspect(url))
   handle('startVideo', async (_event, request, linkId) => {
     const id = await videos.start(request)
     if (linkId !== undefined) releaseLink(linkId)
@@ -240,7 +241,11 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): Down
     manager.resume(id)
   })
 
-  handle('relinkDownload', async (_event, id, url) => manager.relink(id, url))
+  // A video's stream link only works for the address yt-dlp asked from, so yt-dlp gets the new
+  // one whatever was pasted.
+  handle('relinkDownload', async (_event, id, url) =>
+    (await videos.owns(id)) ? videos.relink(id) : manager.relink(id, url)
+  )
 
   handle('setDownloadNetwork', async (_event, id, networkId, enabled) => {
     await manager.setNetworkEnabled(id, networkId, enabled)

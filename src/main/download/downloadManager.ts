@@ -1777,6 +1777,14 @@ export class DownloadManager {
     runtime.state.resumable = !discard
     this.notify('Download failed', `${runtime.state.fileName}: ${describeError(message)}`)
     this.stopRun(runtime)
+    if (!discard) for (const listener of this.failedListeners) listener(runtime.state.id, message)
+  }
+
+  private failedListeners: ((id: string, message: string) => void)[] = []
+
+  /** Told of each download that fails and can still resume: a video's stream gets a fresh link. */
+  onFailed(listener: (id: string, message: string) => void): void {
+    this.failedListeners.push(listener)
   }
 
   /** The server keeps refusing requests over this network: it stops being used until the user

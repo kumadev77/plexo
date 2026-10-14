@@ -40,6 +40,7 @@ const plexoApi = {
     invoke('startDownload', request, linkId),
   startVideo: (request: IpcContract['startVideo']['args'][0], linkId?: string) =>
     invoke('startVideo', request, linkId),
+  inspectVideo: (url: string) => invoke('inspectVideo', url),
   listDownloads: () => invoke('listDownloads'),
   listHistory: () => invoke('listHistory'),
   clearHistory: () => invoke('clearHistory'),

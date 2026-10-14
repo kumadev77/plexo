@@ -1,5 +1,5 @@
 import type { ProbeResult } from '@shared/types'
-import { isVideoPageUrl, VIDEO_QUALITIES, type VideoQuality } from '@shared/video'
+import { isVideoPageUrl, videoQualities, type VideoInfo, type VideoQuality } from '@shared/video'
 import { cn } from 'cn'
 import {
   AlertTriangle,
@@ -110,9 +110,14 @@ function NewDownloadForm({ onDone }: { onDone: () => void }): React.JSX.Element 
   const [skippedFiles, setSkippedFiles] = useState<number[]>([])
   // For this download only: the next one starts on Auto again.
   const [streamsChoice, setStreamsChoice] = useState<StreamsChoice>('auto')
-  // A video page has nothing to probe: yt-dlp reads it once Download is pressed.
+  // A video page has no file to probe: yt-dlp reads which qualities it comes in instead.
   const video = isVideoPageUrl(url)
   const [quality, setQuality] = useState<VideoQuality>('best')
+  const [videoInfo, setVideoInfo] = useState<
+    | { status: 'reading' }
+    | { status: 'ready'; info: VideoInfo }
+    | { status: 'error'; message: string }
+  >({ status: 'reading' })
 
   // Opened with nothing in it: a link on the clipboard is most likely what it's for, as download
   // managers have long assumed. Anything else on the clipboard is left alone.
@@ -147,7 +152,21 @@ function NewDownloadForm({ onDone }: { onDone: () => void }): React.JSX.Element 
     setSkippedFiles([])
     if (isVideoPageUrl(trimmed)) {
       setProbe({ status: 'idle' })
-      return
+      setVideoInfo({ status: 'reading' })
+      setQuality('best')
+      let staleVideo = false
+      const videoTimer = setTimeout(async () => {
+        try {
+          const info = await window.plexo.inspectVideo(trimmed)
+          if (!staleVideo) setVideoInfo({ status: 'ready', info })
+        } catch (error) {
+          if (!staleVideo) setVideoInfo({ status: 'error', message: describeError(error) })
+        }
+      }, PROBE_DEBOUNCE_MS)
+      return () => {
+        staleVideo = true
+        clearTimeout(videoTimer)
+      }
     }
     if (given?.url === trimmed && given.probe) {
       setProbe({ status: 'ready', result: given.probe })
@@ -185,7 +204,8 @@ function NewDownloadForm({ onDone }: { onDone: () => void }): React.JSX.Element 
     ? chosenFiles.reduce((sum, index) => sum + torrent.files[index].length, 0)
     : (ready?.totalBytes ?? null)
   const multiChunkAllowed = ready !== null && ready.supportsRanges && ready.totalBytes !== null
-  const isSingleStreamOnly = ready !== null && !multiChunkAllowed
+  // A video's stream links work only from the address that asked for them: one network.
+  const isSingleStreamOnly = (ready !== null && !multiChunkAllowed) || video
 
   const detectedIds = interfaces.map((iface) => iface.id)
   // A network that has used up its data limit can't carry anything, so it can't be picked.
@@ -208,7 +228,7 @@ function NewDownloadForm({ onDone }: { onDone: () => void }): React.JSX.Element 
       : []
 
   const canStart =
-    (probe.status === 'ready' || video) &&
+    (video ? videoInfo.status === 'ready' : probe.status === 'ready') &&
     (!torrent || chosenFiles.length > 0) &&
     selectedInterfaceIds.length > 0 &&
     Boolean(destinationDir) &&
@@ -533,26 +553,44 @@ function NewDownloadForm({ onDone }: { onDone: () => void }): React.JSX.Element 
               <Video aria-hidden className="size-4" />
             </div>
             <div className="flex min-w-0 flex-1 flex-col gap-1.5">
-              <div className="text-[14px] font-medium">YouTube video</div>
-              <ToggleGroup
-                value={[quality]}
-                onValueChange={(values) => {
-                  if (values.length > 0) setQuality(values[0] as VideoQuality)
-                }}
-                aria-label="Quality"
-                variant="pill"
-                size="xs"
-                spacing={1}
-              >
-                {VIDEO_QUALITIES.map((choice) => (
-                  <ToggleGroupItem key={choice.value} value={choice.value} className="h-6 px-2">
-                    {choice.label}
-                  </ToggleGroupItem>
-                ))}
-              </ToggleGroup>
-              <div className="font-mono text-[11.5px] text-muted-foreground">
-                yt-dlp finds the streams; Plexo downloads them and joins video and audio.
+              <div className="truncate text-[14px] font-medium">
+                {videoInfo.status === 'ready' ? videoInfo.info.title : 'YouTube video'}
               </div>
+              {videoInfo.status === 'reading' && (
+                <div className="font-mono text-[11.5px] text-muted-foreground">
+                  Reading the video’s qualities…
+                </div>
+              )}
+              {videoInfo.status === 'error' && (
+                <div className="flex items-center gap-2 text-[12.5px] text-[var(--color-danger)]">
+                  <AlertTriangle className="size-4 shrink-0" />
+                  {videoInfo.message}
+                </div>
+              )}
+              {videoInfo.status === 'ready' && (
+                <>
+                  <ToggleGroup
+                    value={[quality]}
+                    onValueChange={(values) => {
+                      if (values.length > 0) setQuality(values[0] as VideoQuality)
+                    }}
+                    aria-label="Quality"
+                    variant="pill"
+                    size="xs"
+                    spacing={1}
+                    className="flex-wrap"
+                  >
+                    {videoQualities(videoInfo.info).map((choice) => (
+                      <ToggleGroupItem key={choice.value} value={choice.value} className="h-6 px-2">
+                        {choice.label}
+                      </ToggleGroupItem>
+                    ))}
+                  </ToggleGroup>
+                  <div className="font-mono text-[11.5px] text-muted-foreground">
+                    One network: YouTube’s links work only from the address that asked for them.
+                  </div>
+                </>
+              )}
             </div>
           </div>
         )}
@@ -682,11 +720,14 @@ function NewDownloadForm({ onDone }: { onDone: () => void }): React.JSX.Element 
             Every network has reached its data limit. Raise one in Speed &amp; data limits.
           </div>
         )}
-        {isSingleStreamOnly && selectedInterfaceIds.length === 1 && interfaces.length > 1 && (
-          <div className="text-[12px] text-muted-foreground">
-            This download uses one connection on one network.
-          </div>
-        )}
+        {isSingleStreamOnly &&
+          !video &&
+          selectedInterfaceIds.length === 1 &&
+          interfaces.length > 1 && (
+            <div className="text-[12px] text-muted-foreground">
+              This download uses one connection on one network.
+            </div>
+          )}
       </div>
 
       <div className="flex items-center gap-2 border-t-[0.5px] border-border px-4 py-2">

@@ -3,56 +3,90 @@ import { access, rm } from 'node:fs/promises'
 import { dirname, extname, join } from 'node:path'
 import { app, Notification } from 'electron'
 import type { BrowserContext } from '../../shared/types'
-import type { StartVideoRequest, VideoQuality } from '../../shared/video'
+import type { StartVideoRequest, VideoInfo, VideoQuality } from '../../shared/video'
 import type { DownloadManager } from '../download/downloadManager'
 import { probeUrl } from '../download/probe'
-import { updateJson } from '../jsonFile'
+import { readJson, updateJson } from '../jsonFile'
+import type { NetworkMonitor } from '../network/interfaces'
 import { loadSettings } from '../settings'
 
-// yt-dlp only finds the streams: each one is then an ordinary Plexo download, over every network
-// picked, and ffmpeg joins video and audio once both are in.
+// yt-dlp only finds the streams: each one is then an ordinary Plexo download, and ffmpeg joins
+// video and audio once both are in (or turns audio into mp3).
+//
+// YouTube's stream links carry the IP address that asked for them and refuse any other, so a
+// video downloads over one network, with yt-dlp asking from that same network's address. The
+// links also run out after some hours: a stream that fails gets a fresh one from yt-dlp.
 
 const DEFAULT_YT_DLP = 'D:\\Aplicaciones de Pc\\descargador pro\\yt-dlp.exe'
 const RESOLVE_TIMEOUT_MS = 60_000
-const MERGE_TIMEOUT_MS = 30 * 60_000
+const CONVERT_TIMEOUT_MS = 30 * 60_000
+/** Fresh links a stream gets on its own before it's left for the user's Fix link. */
+const AUTO_RELINKS = 3
+const RELINK_DELAY_MS = 1500
 
-// mp4 + m4a first: they join into an mp4 any player opens. Anything else still joins, into what
-// yt-dlp says fits (often webm or mkv).
-const FORMATS: Record<VideoQuality, string> = {
-  best: 'bv*[ext=mp4]+ba[ext=m4a]/bv*+ba/b',
-  '1080': 'bv*[height<=1080][ext=mp4]+ba[ext=m4a]/bv*[height<=1080]+ba/b[height<=1080]/bv*+ba/b',
-  '720': 'bv*[height<=720][ext=mp4]+ba[ext=m4a]/bv*[height<=720]+ba/b[height<=720]/bv*+ba/b',
-  audio: 'ba[ext=m4a]/ba/b'
+/** yt-dlp's format selector for `quality`. mp4 + m4a first: they join into an mp4 any player
+ * opens; anything else still joins, into what yt-dlp says fits (webm or mkv). */
+function formatFor(quality: VideoQuality): string {
+  if (quality === 'audio' || quality === 'mp3') return 'ba[ext=m4a]/ba'
+  if (quality === 'best') return 'bv*[ext=mp4]+ba[ext=m4a]/bv*+ba/b'
+  const height = `[height=${parseInt(quality, 10)}]`
+  return `bv*${height}[ext=mp4]+ba[ext=m4a]/bv*${height}+ba/b${height}`
 }
 
 interface StreamFormat {
   url: string
   ext: string
+  format_id: string
   http_headers?: Record<string, string>
 }
 
-interface ResolvedVideo {
+interface ResolvedVideo extends Partial<StreamFormat> {
   title: string
   ext: string
-  url?: string
-  http_headers?: Record<string, string>
+  duration?: number
   requested_formats?: StreamFormat[]
+  formats?: { height?: number | null; vcodec?: string; acodec?: string }[]
 }
 
-/** A video waiting on its streams: each one's path once it's in, null until then. Kept on disk,
- * so a join still happens when the streams finish after Plexo restarts. */
+/** Something to do once every one of its downloads is in: each one's path, null until then. */
 interface VideoJob {
+  mode: 'join' | 'mp3'
   output: string
   ffmpeg: string
   parts: Record<string, string | null>
 }
 
-function jobsPath(): string {
-  return join(app.getPath('userData'), 'video-jobs.json')
+/** How to get a fresh link for one stream's download, by its id. */
+interface StreamSource {
+  page: string
+  formatId: string
+  sourceAddress?: string
+  relinks: number
 }
 
-function jobsFrom(value: unknown): VideoJob[] {
-  return Array.isArray(value) ? (value as VideoJob[]) : []
+interface Saved {
+  jobs: VideoJob[]
+  streams: Record<string, StreamSource>
+}
+
+function savedPath(): string {
+  return join(app.getPath('userData'), 'video-downloads.json')
+}
+
+function savedFrom(value: unknown): Saved {
+  const saved = (typeof value === 'object' && value !== null ? value : {}) as Partial<Saved>
+  return {
+    jobs: Array.isArray(saved.jobs) ? saved.jobs : [],
+    streams: typeof saved.streams === 'object' && saved.streams !== null ? saved.streams : {}
+  }
+}
+
+function update(change: (saved: Saved) => void): Promise<void> {
+  return updateJson(savedPath(), (current) => {
+    const saved = savedFrom(current)
+    change(saved)
+    return saved
+  })
 }
 
 function run(file: string, args: string[], timeout: number): Promise<string> {
@@ -104,33 +138,90 @@ async function tools(): Promise<{ ytDlp: string; ffmpeg: string }> {
   return { ytDlp, ffmpeg: (await exists(beside)) ? beside : 'ffmpeg' }
 }
 
-export class VideoDownloads {
-  constructor(private manager: DownloadManager) {
-    manager.onCompleted((id, path) => void this.partDone(id, path))
-  }
-
-  /** Starts a video's streams as downloads; the id is the first one's, to show its screen. */
-  async start(request: StartVideoRequest): Promise<string> {
-    const { ytDlp, ffmpeg } = await tools()
-    const json = await run(
-      ytDlp,
-      ['-J', '--no-playlist', '--no-warnings', '-f', FORMATS[request.quality], request.url],
-      RESOLVE_TIMEOUT_MS
-    ).catch((error: NodeJS.ErrnoException) => {
+async function ytDlp(args: string[]): Promise<string> {
+  const { ytDlp } = await tools()
+  return run(ytDlp, ['--no-playlist', '--no-warnings', ...args], RESOLVE_TIMEOUT_MS).catch(
+    (error: NodeJS.ErrnoException) => {
       throw new Error(
         error.code === 'ENOENT'
           ? 'yt-dlp wasn’t found. Set ytDlpPath in Plexo’s app-settings.json.'
           : `yt-dlp couldn’t read this video: ${error.message}`
       )
-    })
-    const video = JSON.parse(json) as ResolvedVideo
+    }
+  )
+}
+
+const sourceArgs = (address: string | undefined): string[] =>
+  address ? ['--source-address', address] : []
+
+export class VideoDownloads {
+  constructor(
+    private manager: DownloadManager,
+    private networks: NetworkMonitor
+  ) {
+    manager.onCompleted((id, path) => void this.partDone(id, path))
+    manager.onFailed((id) => void this.autoRelink(id))
+  }
+
+  /** The heights and audio a video comes in, for New download to offer. */
+  async inspect(url: string): Promise<VideoInfo> {
+    const video = JSON.parse(await ytDlp(['-J', url])) as ResolvedVideo
+    const formats = video.formats ?? []
+    const heights = new Set<number>()
+    for (const format of formats) {
+      if (format.vcodec !== 'none' && format.height) heights.add(format.height)
+    }
+    return {
+      title: video.title,
+      heights: [...heights].sort((a, b) => b - a),
+      hasAudio: formats.some((format) => format.acodec && format.acodec !== 'none'),
+      durationSeconds: video.duration
+    }
+  }
+
+  /** The IPv4 address of the network a video downloads over: yt-dlp asks from it too. */
+  private async addressOf(networkId: string): Promise<string | undefined> {
+    const network = (await this.networks.refresh()).find((iface) => iface.id === networkId)
+    return network?.addresses.find((address) => address.family === 4)?.address
+  }
+
+  /** Starts a video's streams as downloads; the id is the first one's, to show its screen. */
+  async start(request: StartVideoRequest): Promise<string> {
+    const network = request.interfaceIds[0]
+    if (!network) throw new Error('Select a network')
+    const sourceAddress = await this.addressOf(network)
+    const video = JSON.parse(
+      await ytDlp([
+        '-J',
+        '-f',
+        formatFor(request.quality),
+        ...sourceArgs(sourceAddress),
+        request.url
+      ])
+    ) as ResolvedVideo
     const streams: StreamFormat[] =
       video.requested_formats ??
-      (video.url ? [{ url: video.url, ext: video.ext, http_headers: video.http_headers }] : [])
-    if (streams.length === 0) throw new Error('yt-dlp found nothing to download on this page.')
+      (video.url
+        ? [
+            {
+              url: video.url,
+              ext: video.ext,
+              format_id: video.format_id ?? '',
+              http_headers: video.http_headers
+            }
+          ]
+        : [])
+    if (streams.length === 0) {
+      throw new Error(
+        /^\d+p$/.test(request.quality)
+          ? `This video doesn’t come in ${request.quality}. Pick another quality.`
+          : 'yt-dlp found nothing to download on this page.'
+      )
+    }
 
     const name = safeName(video.title)
     const joined = streams.length > 1
+    const mp3 = request.quality === 'mp3'
     // Every stream is checked before any starts, so a bad one doesn't leave the other running.
     const probed = await Promise.all(
       streams.map(async (stream) => {
@@ -153,52 +244,115 @@ export class VideoDownloads {
           suggestedFileName: `${part}.${ext}`,
           totalBytes: probe.totalBytes ?? 0,
           supportsRanges: probe.supportsRanges && probe.totalBytes !== null,
-          interfaceIds: request.interfaceIds,
+          interfaceIds: [network],
           etag: probe.etag,
           lastModified: probe.lastModified,
           browser
         })
       )
     }
-    if (joined) {
-      const output = await freePath(request.destinationDir, name, video.ext)
-      const parts = Object.fromEntries(ids.map((id) => [id, null]))
-      await updateJson(jobsPath(), (current) => [...jobsFrom(current), { output, ffmpeg, parts }])
-    }
+    const { ffmpeg } = await tools()
+    const job: VideoJob | undefined = joined
+      ? {
+          mode: 'join',
+          output: await freePath(request.destinationDir, name, video.ext),
+          ffmpeg,
+          parts: Object.fromEntries(ids.map((id) => [id, null]))
+        }
+      : mp3
+        ? {
+            mode: 'mp3',
+            output: await freePath(request.destinationDir, name, 'mp3'),
+            ffmpeg,
+            parts: { [ids[0]]: null }
+          }
+        : undefined
+    await update((saved) => {
+      if (job) saved.jobs.push(job)
+      for (const [index, id] of ids.entries()) {
+        saved.streams[id] = {
+          page: request.url,
+          formatId: streams[index].format_id,
+          sourceAddress,
+          relinks: 0
+        }
+      }
+    })
     return ids[0]
+  }
+
+  /** Whether `id` is one of a video's streams: its link comes from yt-dlp, not the user. */
+  async owns(id: string): Promise<boolean> {
+    return id in savedFrom(await readJson(savedPath())).streams
+  }
+
+  /** Asks yt-dlp for a fresh link to a stream, and resumes its download from where it stopped. */
+  async relink(id: string): Promise<void> {
+    const source = savedFrom(await readJson(savedPath())).streams[id]
+    if (!source) throw new Error('This isn’t one of a video’s downloads.')
+    const urls = await ytDlp([
+      '-g',
+      '-f',
+      source.formatId,
+      ...sourceArgs(source.sourceAddress),
+      source.page
+    ])
+    const url = urls.split(/\r?\n/).find((line) => /^https?:\/\//.test(line))
+    if (!url) throw new Error('yt-dlp gave no new link for this video.')
+    await this.manager.relink(id, url)
+  }
+
+  private async autoRelink(id: string): Promise<void> {
+    let allowed = false
+    await update((saved) => {
+      const source = saved.streams[id]
+      if (!source || source.relinks >= AUTO_RELINKS) return
+      source.relinks++
+      allowed = true
+    })
+    if (!allowed) return
+    // The run winds down after it fails; relink takes a download once it's stopped.
+    await new Promise((resolve) => setTimeout(resolve, RELINK_DELAY_MS))
+    await this.relink(id).catch((error) =>
+      console.error('[plexo] video: no fresh link for', id, error)
+    )
   }
 
   private async partDone(id: string, path: string): Promise<void> {
     let ready: VideoJob | undefined
-    await updateJson(jobsPath(), (current) => {
-      const jobs = jobsFrom(current)
-      const job = jobs.find((candidate) => id in candidate.parts)
-      if (!job) return jobs
+    await update((saved) => {
+      delete saved.streams[id]
+      const job = saved.jobs.find((candidate) => id in candidate.parts)
+      if (!job) return
       job.parts[id] = path
       if (Object.values(job.parts).every((part) => part !== null)) ready = job
-      // Taken off now: a join that fails leaves the streams for the user, not a retry loop.
-      return ready ? jobs.filter((candidate) => candidate !== ready) : jobs
+      // Taken off now: one that fails leaves the files for the user, not a retry loop.
+      if (ready) saved.jobs = saved.jobs.filter((candidate) => candidate !== ready)
     })
-    if (ready) await this.join(ready)
+    if (ready) await this.finish(ready)
   }
 
-  private async join(job: VideoJob): Promise<void> {
+  private async finish(job: VideoJob): Promise<void> {
     const parts = Object.values(job.parts) as string[]
     const inputs = parts.flatMap((part) => ['-i', part])
-    const maps = parts.flatMap((_, index) => ['-map', `${index}:${index === 0 ? 'v:0' : 'a:0'}`])
+    const args =
+      job.mode === 'mp3'
+        ? [...inputs, '-vn', '-c:a', 'libmp3lame', '-q:a', '2']
+        : [
+            ...inputs,
+            ...parts.flatMap((_, index) => ['-map', `${index}:${index === 0 ? 'v:0' : 'a:0'}`]),
+            '-c',
+            'copy'
+          ]
     try {
-      await run(
-        job.ffmpeg,
-        ['-y', '-loglevel', 'error', ...inputs, ...maps, '-c', 'copy', job.output],
-        MERGE_TIMEOUT_MS
-      )
+      await run(job.ffmpeg, ['-y', '-loglevel', 'error', ...args, job.output], CONVERT_TIMEOUT_MS)
       await Promise.all(parts.map((part) => rm(part, { force: true })))
       new Notification({ title: 'Video ready', body: job.output }).show()
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error)
       new Notification({
-        title: 'Couldn’t join the video',
-        body: `${reason}. Its video and audio stay in the folder.`
+        title: job.mode === 'mp3' ? 'Couldn’t make the mp3' : 'Couldn’t join the video',
+        body: `${reason}. The downloaded files stay in the folder.`
       }).show()
     }
   }
