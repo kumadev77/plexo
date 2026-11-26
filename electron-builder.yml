@@ -8,6 +8,8 @@ directories:
 files:
   - '!**/.vscode/*'
   - '!src/*'
+  # Local folder of old installers and extension builds: packed, it made the setup 1.3 GB.
+  - '!release/**'
   - '!electron.vite.config.{js,ts,mjs,cjs}'
   - '!{.eslintcache,eslint.config.mjs,.prettierignore,.prettierrc.yaml,dev-app-update.yml,CHANGELOG.md,README.md}'
   - '!{.env,.env.*,.npmrc,pnpm-lock.yaml}'
