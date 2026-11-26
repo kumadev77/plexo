@@ -3,7 +3,7 @@ import { access, rm } from 'node:fs/promises'
 import { dirname, extname, join } from 'node:path'
 import { app, Notification } from 'electron'
 import type { BrowserContext } from '../../shared/types'
-import type { StartVideoRequest, VideoInfo, VideoQuality } from '../../shared/video'
+import type { StartVideoRequest, VideoFormat, VideoInfo, VideoQuality } from '../../shared/video'
 import type { DownloadManager } from '../download/downloadManager'
 import { probeUrl } from '../download/probe'
 import { readJson, updateJson } from '../jsonFile'
@@ -24,13 +24,73 @@ const CONVERT_TIMEOUT_MS = 30 * 60_000
 const AUTO_RELINKS = 3
 const RELINK_DELAY_MS = 1500
 
+/** Streams Plexo can fetch as one file. YouTube also lists each height as HLS (m3u8) and some
+ * sites as DASH segments: picked, those downloaded the few-KB playlist instead of the video. */
+const DIRECT = '[protocol^=http][protocol!*=dash]'
+
 /** yt-dlp's format selector for `quality`. mp4 + m4a first: they join into an mp4 any player
  * opens; anything else still joins, into what yt-dlp says fits (webm or mkv). */
-function formatFor(quality: VideoQuality): string {
-  if (quality === 'audio' || quality === 'mp3') return 'ba[ext=m4a]/ba'
-  if (quality === 'best') return 'bv*[ext=mp4]+ba[ext=m4a]/bv*+ba/b'
-  const height = `[height=${parseInt(quality, 10)}]`
-  return `bv*${height}[ext=mp4]+ba[ext=m4a]/bv*${height}+ba/b${height}`
+export function formatFor(quality: VideoQuality): string {
+  const audio = `ba[ext=m4a]${DIRECT}/ba${DIRECT}`
+  if (quality === 'audio' || quality === 'mp3') return audio
+  if (quality === 'best') {
+    return `bv*[ext=mp4]${DIRECT}+ba[ext=m4a]${DIRECT}/bv*${DIRECT}+ba${DIRECT}/b${DIRECT}`
+  }
+  const id = quality.slice(quality.indexOf(':') + 1)
+  return quality.startsWith('video:') ? `${id}+ba[ext=m4a]${DIRECT}/${id}+ba${DIRECT}` : id
+}
+
+interface ListedFormat {
+  format_id: string
+  protocol?: string
+  ext?: string
+  height?: number | null
+  fps?: number | null
+  vcodec?: string
+  acodec?: string
+  abr?: number | null
+  tbr?: number | null
+  filesize?: number | null
+  filesize_approx?: number | null
+}
+
+function sizeLabel(bytes: number | null | undefined): string {
+  if (!bytes) return ''
+  if (bytes >= 1024 ** 3) return ` · ${(bytes / 1024 ** 3).toFixed(2)} GB`
+  if (bytes >= 1024 ** 2) return ` · ${Math.round(bytes / 1024 ** 2)} MB`
+  return ` · ${Math.max(1, Math.round(bytes / 1024))} KB`
+}
+
+const codec = (name: string | undefined): string => (name ?? '').split('.')[0]
+const hasVideo = (f: ListedFormat): boolean => !!f.vcodec && f.vcodec !== 'none'
+const hasAudio = (f: ListedFormat): boolean => !!f.acodec && f.acodec !== 'none'
+
+/** Every format of `formats` Plexo can download as one file, for New download to list. */
+export function listFormats(formats: ListedFormat[]): VideoFormat[] {
+  const direct = formats.filter(
+    (f) => f.format_id && /^https?$/.test(f.protocol ?? '') && (hasVideo(f) || hasAudio(f))
+  )
+  const size = (f: ListedFormat): string => sizeLabel(f.filesize ?? f.filesize_approx)
+  const video = direct
+    .filter(hasVideo)
+    .sort((a, b) => (b.height ?? 0) - (a.height ?? 0) || (b.tbr ?? 0) - (a.tbr ?? 0))
+    .map((f): VideoFormat => {
+      const fps = f.fps && f.fps > 30 ? Math.round(f.fps) : ''
+      return {
+        value: hasAudio(f) ? `format:${f.format_id}` : `video:${f.format_id}`,
+        label: `${f.height ?? '?'}p${fps} ${f.ext} ${codec(f.vcodec)}${hasAudio(f) ? ' +audio' : ''}${size(f)}`
+      }
+    })
+  const audio = direct
+    .filter((f) => !hasVideo(f))
+    .sort((a, b) => (b.abr ?? 0) - (a.abr ?? 0))
+    .map((f): VideoFormat => ({
+      value: `format:${f.format_id}`,
+      label: `Audio ${f.ext} ${codec(f.acodec)}${f.abr ? ` ${Math.round(f.abr)}k` : ''}${
+        /drc/i.test(f.format_id) ? ' DRC' : ''
+      }${size(f)}`
+    }))
+  return [...video, ...audio]
 }
 
 interface StreamFormat {
@@ -45,7 +105,7 @@ interface ResolvedVideo extends Partial<StreamFormat> {
   ext: string
   duration?: number
   requested_formats?: StreamFormat[]
-  formats?: { height?: number | null; vcodec?: string; acodec?: string }[]
+  formats?: ListedFormat[]
 }
 
 /** Something to do once every one of its downloads is in: each one's path, null until then. */
@@ -176,17 +236,13 @@ export class VideoDownloads {
     manager.onFailed((id) => void this.autoRelink(id))
   }
 
-  /** The heights and audio a video comes in, for New download to offer. */
+  /** Every format a video comes in, for New download to offer. */
   async inspect(url: string): Promise<VideoInfo> {
     const video = JSON.parse(await ytDlp(['-J', url])) as ResolvedVideo
     const formats = video.formats ?? []
-    const heights = new Set<number>()
-    for (const format of formats) {
-      if (format.vcodec !== 'none' && format.height) heights.add(format.height)
-    }
     return {
       title: video.title,
-      heights: [...heights].sort((a, b) => b - a),
+      formats: listFormats(formats),
       hasAudio: formats.some((format) => format.acodec && format.acodec !== 'none'),
       durationSeconds: video.duration
     }
@@ -226,8 +282,8 @@ export class VideoDownloads {
         : [])
     if (streams.length === 0) {
       throw new Error(
-        /^\d+p$/.test(request.quality)
-          ? `This video doesn’t come in ${request.quality}. Pick another quality.`
+        request.quality.includes(':')
+          ? 'This format isn’t available anymore. Pick another one.'
           : 'yt-dlp found nothing to download on this page.'
       )
     }
