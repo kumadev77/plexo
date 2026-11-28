@@ -15,6 +15,7 @@ import { browserContextFrom, requestHeaders } from './download/browserContext'
 import type { DownloadManager } from './download/downloadManager'
 import { probeUrl } from './download/probe'
 import type { Offer } from './openLinks'
+import { rememberYouTubeCookies } from './video/videoDownloads'
 import { loadSettings, saveSettings } from './settings'
 
 // HTTP on 127.0.0.1 works in every browser with nothing to register. There's no pairing: nothing
@@ -218,7 +219,15 @@ async function add(
   // A magnet link has nothing to check here: New download looks it up. A video page is a web
   // page, not the file: yt-dlp finds that once a quality is picked.
   if (/^magnet:/i.test(request.url)) return hold({ url: request.url })
-  if (isVideoPageUrl(request.url)) return hold({ url: request.url, from: request.browser?.name })
+  if (isVideoPageUrl(request.url)) {
+    // Kept before New download asks yt-dlp, so an age-restricted video reads on the first try.
+    if (request.browser) {
+      await rememberYouTubeCookies(request.browser.cookies).catch((error) =>
+        console.error('[plexo] video: couldn’t keep the YouTube session', error)
+      )
+    }
+    return hold({ url: request.url, from: request.browser?.name })
+  }
 
   const gone = new Promise<void>((resolve) =>
     res.once('close', () => !res.writableFinished && resolve())

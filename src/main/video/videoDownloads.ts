@@ -1,8 +1,8 @@
 import { execFile } from 'node:child_process'
-import { access, rm } from 'node:fs/promises'
+import { access, rm, writeFile } from 'node:fs/promises'
 import { dirname, extname, join } from 'node:path'
 import { app, Notification } from 'electron'
-import type { BrowserContext } from '../../shared/types'
+import type { BrowserContext, BrowserCookie } from '../../shared/types'
 import type { StartVideoRequest, VideoFormat, VideoInfo, VideoQuality } from '../../shared/video'
 import type { DownloadManager } from '../download/downloadManager'
 import { probeUrl } from '../download/probe'
@@ -210,15 +210,51 @@ function jsRuntime(): Promise<string[]> {
   return nodeRuntime
 }
 
+// Age-restricted and members-only videos need a signed-in YouTube session. yt-dlp's YouTube
+// OAuth is gone, so the session is the browser's: the extension sends its youtube.com cookies
+// with each video page, they're kept here, and yt-dlp reads and refreshes them on every call.
+function cookiesPath(): string {
+  return join(app.getPath('userData'), 'youtube-cookies.txt')
+}
+
+/** Cookies only a signed-in session has: a signed-out browser mustn't replace a signed-in one. */
+const SIGNED_IN = new Set(['SAPISID', '__Secure-3PAPISID', '__Secure-3PSID', 'LOGIN_INFO'])
+
+/** youtube.com cookies as the Netscape file yt-dlp reads, or null when they aren't signed in. */
+export function cookiesFile(cookies: BrowserCookie[], expires: number): string | null {
+  const youtube = cookies.filter(
+    (c) =>
+      /(^|\.)youtube\.com$/i.test(c.domain) &&
+      ![c.domain, c.path, c.name, c.value].some((field) => /[\t\r\n]/.test(field))
+  )
+  if (!youtube.some((c) => SIGNED_IN.has(c.name))) return null
+  const lines = youtube.map((c) => {
+    const domain = c.hostOnly ? c.domain.replace(/^\./, '') : `.${c.domain.replace(/^\./, '')}`
+    const flag = (on: boolean): string => (on ? 'TRUE' : 'FALSE')
+    return [domain, flag(!c.hostOnly), c.path, flag(c.secure), expires, c.name, c.value].join('\t')
+  })
+  return ['# Netscape HTTP Cookie File', ...lines, ''].join('\n')
+}
+
+/** Keeps the browser's YouTube session for yt-dlp, when it's a signed-in one. */
+export async function rememberYouTubeCookies(cookies: BrowserCookie[]): Promise<void> {
+  // The browser doesn't send expiry dates; a year on, yt-dlp keeps them current anyway.
+  const file = cookiesFile(cookies, Math.floor(Date.now() / 1000) + 365 * 24 * 3600)
+  if (file) await writeFile(cookiesPath(), file, { mode: 0o600 })
+}
+
 async function ytDlp(args: string[]): Promise<string> {
   const { ytDlp } = await tools()
-  const base = ['--no-playlist', '--no-warnings', '--no-update', ...(await jsRuntime())]
+  const cookies = (await exists(cookiesPath())) ? ['--cookies', cookiesPath()] : []
+  const base = ['--no-playlist', '--no-warnings', '--no-update', ...cookies, ...(await jsRuntime())]
   return run(ytDlp, [...base, ...args], RESOLVE_TIMEOUT_MS).catch(
     (error: NodeJS.ErrnoException) => {
       throw new Error(
         error.code === 'ENOENT'
           ? 'yt-dlp wasn’t found. Set ytDlpPath in Plexo’s app-settings.json.'
-          : `yt-dlp couldn’t read this video: ${error.message}`
+          : /sign in to confirm|age-restricted|members-only/i.test(error.message)
+            ? 'This video needs a signed-in YouTube account. Open it in your browser while signed in to YouTube and use “Download video with Plexo” once: Plexo keeps that session for every video after.'
+            : `yt-dlp couldn’t read this video: ${error.message}`
       )
     }
   )
